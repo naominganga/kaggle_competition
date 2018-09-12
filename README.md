@@ -1,2 +1,2 @@
-# kaggle_competition
-machine learning projects
+#Machine Leaning projects
+kaggle competitions
