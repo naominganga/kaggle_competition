@@ -1,0 +1,237 @@
+---
+title: "Titanic dataset"
+author: "Naomi Ng’ang'a"
+date: "6/20/2018"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+#Setting working directory
+
+basedir <- "/Users/busarauser/Box Sync/box_sync/self_learning/Kaggle_competition/titanic"
+knitr::opts_knit$set(root.dir = basedir)
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,message = FALSE)
+knitr::opts_chunk$set(error = TRUE)
+
+#* Clear all data from memory 
+  rm(list = ls())
+  
+
+# load required package
+pkgs <- c("readxl", "dplyr", "tidyverse","ggplot2","caret","kernlab","ROCR","class",
+          "mice", "lubridate", "tidyr","factoextra","Hmisc","DMwR","caret","randomForest")
+
+#if(!"pacman" %in% installed.package_cats()[,1]){install.package_cats("pacman")}
+pacman::p_load(pkgs, character.only = T, install = T)
+
+options(scipen = 999)
+
+```
+
+
+#reading in data
+
+```{r}
+
+train<-read.csv("./data/train.csv",stringsAsFactors = F)
+
+test<-read.csv("./data/test.csv",stringsAsFactors = F)
+
+#combine the data set
+full_data <- plyr::rbind.fill(train, test)
+```
+
+#Data Cleaning
+
+```{r}
+#check data structure
+
+str(full_data)
+
+#creeate factors
+full_data<-full_data%>%
+  mutate(Survived=factor(Survived,levels=0:1,labels=c("Died","Survived")),
+         Pclass=factor(Pclass, levels=1:3,labels=c("Upper","Middle","Lower")),
+         Sex=as.factor(Sex))
+
+```
+
+
+#check for missingness in data
+
+```{r}
+
+#check for pattern or missing values in data.
+
+missingnes<-apply(full_data, 2, function(col)sum(is.na(col) |col=="")/length(col)*100)
+missingnes
+
+###removing all variables with missing more than 50 %
+
+full_data=full_data[,apply(full_data, 2, function(col)sum(is.na(col) |col=="")/length(col)*100<50)]
+
+#Impute missing Fare by Mean
+
+summary(full_data$Fare)
+
+#N/B error on zero fare for older guys
+
+#check median fare for Pclass
+
+aggregate(full_data$Fare~full_data$Pclass,full_data,median)
+
+#Impute zero fare with these
+full_data<-full_data%>%
+  mutate(Fare=ifelse(Fare==0.0000 & Pclass=="Upper",60.0000,
+                    ifelse(Fare==0.0000 & Pclass=="Middle",15.0458,
+                    ifelse(Fare==0.0000 & Pclass=="Lower",8.0500,Fare))))
+
+
+#Impute missing Fare by median
+summary(full_data$Age)
+
+full_data<-full_data%>%
+  group_by(Pclass)%>%
+  mutate(Fare=Hmisc::impute(Fare, median))
+
+
+#Generate Variable Title from name(might help in filling in missing age values)
+
+#I only considered the most common titles
+
+full_data<-full_data%>%
+mutate(title=ifelse(grepl("mr", tolower(Name)),"Mr", 
+                       ifelse(grepl("miss", tolower(Name)),"Miss", 
+                              ifelse(grepl("mrs", tolower(Name)),"Mrs", 
+                                     ifelse(grepl("master", tolower(Name)), "Master","Unknown")))))
+
+#Impute missing age by median
+
+full_data<-full_data%>%
+  group_by(title)%>%
+  mutate(Age=Hmisc::impute(Age, median))
+
+
+#replace missing values for embarked
+View(full_data[full_data$Embarked=="",])
+
+full_data<-full_data%>%
+  mutate(Embarked=ifelse(Embarked=="","S",Embarked),
+           #change Embarked to factors
+         Embarked=as.factor(Embarked))
+
+  
+
+
+#create a variable for family size 
+full_data$FamilySize <- full_data$SibSp + full_data$Parch + 1
+
+
+
+#categorize the family size to (single,small,large)
+
+full_data$FamilyCat <- cut(full_data$FamilySize, c(0,1,4,12),labels = c("single","small","large"))
+
+```
+
+#select only relevant variables for modelling
+
+```{r}
+full_data<-full_data%>%
+  ungroup%>%
+  select(Survived,Pclass,Sex,Age,FamilyCat,Embarked)
+
+```
+
+
+```{r}
+#divide data into train and test
+model_train <- full_data[1:nrow(train),]
+model_test <- full_data[-(1:nrow(train)),]
+
+```
+
+#decision trees
+
+```{r}
+
+#run a decision tree
+rpart.model <- rpart::rpart(Survived ~ Pclass + Sex + Age +  Embarked + FamilyCat,data=model_train, method="class")
+
+#make prediction on test data
+
+rpart.prediction <- predict(rpart.model, model_test)
+```
+
+#export output
+
+
+```{r}
+
+sample <- read.csv("./data/gender_submission.csv")
+
+finalsub_Rpart <- data.frame(PassengerId = sample$PassengerId,Survived = rpart.prediction)
+
+#round off the prediction to 0 1
+finalsub_Rpart<-finalsub_Rpart%>%
+  select(PassengerId,Survived.Survived)%>%
+  rename(Survived=Survived.Survived)%>%
+  mutate(Survived=round(Survived,0))
+
+write.csv(finalsub_Rpart,"./output/Rpart_submission.csv",row.names = F)
+```
+
+
+#Random forest
+
+```{r}
+
+#Find the best number of nodes to split on at each level
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+
+set.seed(20)
+ 
+ mtry <- sqrt(ncol(model_train))
+ 
+tunegrid <- expand.grid(.mtry=mtry)
+ 
+ rf_random <- train(Survived ~ Pclass + Sex + Age +  Embarked + FamilyCat, data=model_train, method="rf", metric="Accuracy", tuneLength=15, trControl=control)
+ print(rf_random)
+
+#run random forest
+
+rf_model<-randomForest(Survived ~ Pclass + Sex + Age +  Embarked + FamilyCat, data=model_train,type=classification, ntree=2000,mtry=2)
+
+#make prediction on test data
+
+rf.prediction = predict(rf_model,model_test)
+
+#check accuracy
+
+```
+
+
+
+#Export predictions 
+
+```{r}
+
+sample <- read.csv("./data/gender_submission.csv")
+
+#finalsub_rpart <- data.frame(PassengerId = sample$PassengerId,Survived = rpart.prediction)
+
+finalsub_R_F <- data.frame(PassengerId = sample$PassengerId,Survived = rf.prediction)
+
+
+#replace values to 0,1
+
+finalsub_R_F<-finalsub_R_F%>%
+  select(PassengerId,Survived)%>%
+  mutate(Survived=ifelse(Survived=="Survived",1,0))
+
+write.csv(finalsub_R_F,"./output/RF_submission.csv",row.names = F)
+
+```
+
